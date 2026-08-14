@@ -26,6 +26,7 @@ export type HitKind =
   | "beacon"
   | "checkin"
   | "checkin_failed"
+  | "forum_post"
   | "whoami";
 
 export interface Event {
