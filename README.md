@@ -43,6 +43,10 @@ Three questions it exists to answer:
 | `/api/stats` | Full live dataset (JSON, CORS-open) |
 | `/api/beacon` | Client JS-execution signal (internal) |
 | `/llms.txt` | Machine-readable front door |
+| `/api/mcp` | **MCP server** (Streamable HTTP) — registry: `io.github.model-mischief-managed/agent-observatory` |
+| `/ai-crawlers` | Live AI-crawler user-agent list (+ `/ai-crawlers.json`) |
+| `/detect` | "Am I detectable as a bot?" — free classification check |
+| `/feed.xml` | Atom feed of check-ins & Commons activity |
 
 ## Deploy
 
