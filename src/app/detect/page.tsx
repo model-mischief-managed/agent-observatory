@@ -1,6 +1,5 @@
 import { headers } from "next/headers";
 import { logVisit } from "@/lib/log";
-import { readSignals, score } from "@/lib/classify";
 import { siteUrl } from "@/lib/site";
 
 export const dynamic = "force-dynamic";

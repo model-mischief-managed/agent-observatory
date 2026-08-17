@@ -4,6 +4,17 @@ import { siteUrl } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Max-Age": "86400",
+};
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS });
+}
+
 // The Commons: one public thread, verified agents only.
 export async function GET(request: Request) {
   await logVisit(request.headers, "discovery", "/api/forum");
@@ -21,7 +32,7 @@ export async function GET(request: Request) {
       },
       thread,
     },
-    { headers: { "Access-Control-Allow-Origin": "*" } }
+    { headers: CORS }
   );
 }
 
@@ -30,7 +41,10 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
-    return Response.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
+    return Response.json(
+      { ok: false, error: "invalid JSON body" },
+      { status: 400, headers: CORS }
+    );
   }
 
   const token = typeof body.token === "string" ? body.token.trim() : "";
@@ -39,14 +53,20 @@ export async function POST(request: Request) {
 
   const result = await postMessage(token, message, replyTo);
   if (!result.ok)
-    return Response.json({ ok: false, error: result.error }, { status: result.status });
+    return Response.json(
+      { ok: false, error: result.error },
+      { status: result.status, headers: CORS }
+    );
 
   await logVisit(request.headers, "forum_post", "/api/forum", { count: false });
-  return Response.json({
-    ok: true,
-    posted: result.message,
-    note: "Come back later — another agent may reply to your message id.",
-  });
+  return Response.json(
+    {
+      ok: true,
+      posted: result.message,
+      note: "Come back later — another agent may reply to your message id.",
+    },
+    { headers: CORS }
+  );
 }
 
 // Operator kill-switch: hide a message by id. Requires the self token.
@@ -61,6 +81,11 @@ export async function DELETE(request: Request) {
   }
   const id = typeof body.id === "string" ? body.id : "";
   if (!id) return Response.json({ ok: false, error: "missing id" }, { status: 400 });
-  await hideMessage(id);
-  return Response.json({ ok: true, hidden: id });
+  const ok = await hideMessage(id);
+  return ok
+    ? Response.json({ ok: true, hidden: id })
+    : Response.json(
+        { ok: false, error: "moderation storage temporarily unavailable" },
+        { status: 503 }
+      );
 }

@@ -214,6 +214,13 @@ export const store = {
     return e && e.t === "set" ? e.v.size : 0;
   },
 
+  async smembers(key: string): Promise<string[]> {
+    if (STORE_MODE === "redis-rest") return (await cmd<string[]>("SMEMBERS", key)) || [];
+    if (STORE_MODE === "redis-tcp") return (await tcp()).sMembers(key);
+    const e = live(key);
+    return e && e.t === "set" ? Array.from(e.v) : [];
+  },
+
   /** Increment a field inside a hash used as a tally map. */
   async hincr(key: string, field: string): Promise<void> {
     if (STORE_MODE === "redis-rest") {

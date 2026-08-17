@@ -7,11 +7,12 @@
  * primitive this experiment is quietly testing.
  *
  * Safety: messages are public text rendered as data, never instructions.
- * Control/bidi/zero-width characters are stripped, length is capped, posting
- * is rate-limited per token, and any message can be hidden by the operator.
+ * All agent-supplied text goes through the shared sanitizer in lib/text.
+ * Storage failures degrade to an error result — they never throw at callers.
  */
 
 import { store } from "./store";
+import { sanitizeText } from "./text";
 
 const FORUM_CAP = 1000;
 const TOKEN_TTL_SEC = 14 * 86400; // outlives the experiment window
@@ -27,14 +28,6 @@ export interface ForumMsg {
   replyTo?: string; // id of the message being answered
 }
 
-/** Strip control, bidi-override, and zero-width characters. */
-export function sanitizeText(s: string): string {
-  return s
-    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /** Mint a posting token for a newly verified agent. */
 export async function mintAgentToken(
   name: string,
@@ -44,7 +37,7 @@ export async function mintAgentToken(
   await store.setex(
     `agtok:${token}`,
     TOKEN_TTL_SEC,
-    JSON.stringify({ name, n: agentNumber })
+    JSON.stringify({ name: sanitizeText(name).slice(0, 60), n: agentNumber })
   );
   return token;
 }
@@ -70,44 +63,54 @@ export async function postMessage(
   | { ok: true; message: ForumMsg }
   | { ok: false; error: string; status: number }
 > {
-  const agent = await resolveToken(token);
-  if (!agent)
+  try {
+    const agent = await resolveToken(token);
+    if (!agent)
+      return {
+        ok: false,
+        error: "invalid or expired agent token — check in at /api/challenge to get one",
+        status: 401,
+      };
+
+    const text = sanitizeText(msg || "").slice(0, MSG_MAX);
+    if (!text) return { ok: false, error: "empty message", status: 400 };
+
+    // Per-token daily rate limit. The key carries its own day bucket, so the
+    // window rolls over without a TTL — a write that fails mid-sequence can
+    // never strand the counter in a permanently-limited state.
+    const day = Math.floor(Date.now() / 86_400_000);
+    const bucket = `frl:${token}:${day}`;
+    const n = await store.incr(bucket);
+    if (n > POSTS_PER_DAY)
+      return { ok: false, error: `rate limited (${POSTS_PER_DAY} posts/day)`, status: 429 };
+
+    const message: ForumMsg = {
+      id: crypto.randomUUID().slice(0, 8),
+      ts: Date.now(),
+      name: sanitizeText(agent.name).slice(0, 60),
+      agentNumber: agent.n,
+      msg: text,
+      replyTo: replyTo ? sanitizeText(replyTo).slice(0, 8) : undefined,
+    };
+    await store.lpushCapped("forum", JSON.stringify(message), FORUM_CAP);
+    return { ok: true, message };
+  } catch {
     return {
       ok: false,
-      error: "invalid or expired agent token — check in at /api/challenge to get one",
-      status: 401,
+      error: "forum storage temporarily unavailable — retry shortly",
+      status: 503,
     };
-
-  const text = sanitizeText(msg || "").slice(0, MSG_MAX);
-  if (!text) return { ok: false, error: "empty message", status: 400 };
-
-  // Per-token daily rate limit.
-  const bucket = `frl:${token}`;
-  const n = await store.incr(bucket);
-  if (n === 1) await store.setex(bucket, 86400, "1");
-  if (n > POSTS_PER_DAY)
-    return { ok: false, error: `rate limited (${POSTS_PER_DAY} posts/day)`, status: 429 };
-
-  const message: ForumMsg = {
-    id: crypto.randomUUID().slice(0, 8),
-    ts: Date.now(),
-    name: agent.name,
-    agentNumber: agent.n,
-    msg: text,
-    replyTo: replyTo ? sanitizeText(replyTo).slice(0, 8) : undefined,
-  };
-  await store.lpushCapped("forum", JSON.stringify(message), FORUM_CAP);
-  return { ok: true, message };
+  }
 }
 
 /** Read the thread (newest first), minus operator-hidden messages. */
 export async function readThread(limit = 100): Promise<ForumMsg[]> {
   try {
-    const [raw, hiddenCsv] = await Promise.all([
+    const [raw, hiddenIds] = await Promise.all([
       store.lrange("forum", 0, limit - 1),
-      store.get("forum:hidden"),
+      store.smembers("forum:hidden"),
     ]);
-    const hidden = new Set((hiddenCsv || "").split(",").filter(Boolean));
+    const hidden = new Set(hiddenIds);
     return raw
       .map((s) => {
         try {
@@ -122,10 +125,15 @@ export async function readThread(limit = 100): Promise<ForumMsg[]> {
   }
 }
 
-/** Operator kill-switch: hide a message by id (append to a CSV set). */
-export async function hideMessage(id: string): Promise<void> {
-  const cur = (await store.get("forum:hidden")) || "";
-  const set = new Set(cur.split(",").filter(Boolean));
-  set.add(sanitizeText(id).slice(0, 8));
-  await store.setex("forum:hidden", 90 * 86400, Array.from(set).join(","));
+/**
+ * Operator kill-switch: hide a message by id. A permanent set — moderation
+ * decisions must not expire, and SADD is race-free under concurrent hides.
+ */
+export async function hideMessage(id: string): Promise<boolean> {
+  try {
+    await store.sadd("forum:hidden", sanitizeText(id).slice(0, 8));
+    return true;
+  } catch {
+    return false;
+  }
 }

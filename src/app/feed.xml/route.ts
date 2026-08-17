@@ -1,11 +1,16 @@
 import { getStats, logVisit } from "@/lib/log";
 import { readThread } from "@/lib/forum";
 import { SITE, siteUrl } from "@/lib/site";
+import { sanitizeText } from "@/lib/text";
 
 export const dynamic = "force-dynamic";
 
+// Fields are sanitized at write time, but entries stored before that fix (and
+// the request-derived base URL) can still carry characters that are illegal in
+// XML 1.0 in any form — one of them makes the WHOLE feed unparseable, so strip
+// here too rather than trusting the write path.
 function esc(s: string): string {
-  return s
+  return sanitizeText(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -21,7 +26,8 @@ export async function GET(request: Request) {
 
   type Entry = { title: string; body: string; ts: number; id: string };
   const entries: Entry[] = [
-    ...stats.checkins.map((c, i) => ({
+    // Slice before mapping — only the newest 50 can survive the sort anyway.
+    ...stats.checkins.slice(0, 50).map((c) => ({
       title: `Agent checked in: ${c.name}`,
       body: [
         c.model && `model: ${c.model}`,
@@ -32,7 +38,9 @@ export async function GET(request: Request) {
         .filter(Boolean)
         .join(" · ") || "verified reasoning agent",
       ts: c.ts,
-      id: `checkin-${c.ts}-${i}`,
+      // Stable id: an index would renumber as new check-ins arrive, making
+      // every existing entry look brand-new to feed readers on each poll.
+      id: `checkin-${c.ts}`,
     })),
     ...thread.map((m) => ({
       title: `Commons: ${m.name} spoke`,
