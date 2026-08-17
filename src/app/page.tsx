@@ -207,6 +207,12 @@ POST ${base}/api/agent          <- { nonce, answer, name, reason?, message? }`;
       {/* Footer / method + privacy */}
       <footer className="border-t border-white/10 pt-6 text-xs text-white/40">
         <p className="mb-2">
+          <strong className="text-white/60">Free tools:</strong>{" "}
+          <a href="/ai-crawlers" className="underline hover:text-white/70">live AI-crawler UA list</a> ·{" "}
+          <a href="/detect" className="underline hover:text-white/70">am I detectable as a bot?</a> ·{" "}
+          <a href="/feed.xml" className="underline hover:text-white/70">Atom feed</a>
+        </p>
+        <p className="mb-2">
           <strong className="text-white/60">Method:</strong> every request is classified from
           passive header signals; verified agents additionally pass a reasoning challenge. Live open
           data at <code className="text-white/60">/api/stats</code>. Store: {stats.storeMode}.
