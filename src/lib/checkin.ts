@@ -17,6 +17,27 @@ import type { Signals } from "./classify";
 
 const MAX_CHECKINS_PER_HOUR = 20;
 
+/**
+ * Cap on how many check-ins sharing BOTH a source and an agent identity may be
+ * counted as distinct verified agents.
+ *
+ * Learned the hard way: an operator diagnostic sweep from one machine produced
+ * 19 "verified agents" in two hours because it simply forgot the self-exclusion
+ * header. Exclusion that depends on a caller remembering a header is not a
+ * safeguard.
+ *
+ * Keyed on (sourceHash + agent name), NOT source alone: autonomous agents
+ * overwhelmingly run in cloud environments where many genuinely distinct agents
+ * share one egress IP. A source-only cap would silently stop counting real
+ * agents behind a shared NAT — suppressing the exact signal this experiment
+ * exists to measure. Repeat check-ins under the SAME identity are what we cap;
+ * a new identity from the same host still counts.
+ *
+ * Beyond the cap a check-in still verifies and still gets a token — it just
+ * lands in the conformance ledger instead of the census.
+ */
+const MAX_COUNTED_PER_IDENTITY = 3;
+
 export interface CheckinInput {
   nonce?: unknown;
   answer?: unknown;
@@ -33,7 +54,10 @@ export type CheckinResult =
       agentNumber: number;
       agentToken?: string;
       signals: Signals;
+      /** true when the check-in did not count toward the census */
       excluded: boolean;
+      /** why it did not count — so callers can say something accurate */
+      reason: "counted" | "excluded" | "identity-cap";
       name: string;
     }
   | { ok: false; status: number; error: string; triesLeft?: number };
@@ -104,12 +128,32 @@ export async function performCheckin(
     verifiedAgent: true,
   });
 
+  // Second gate: repeated check-ins under the same identity from the same
+  // source stop counting toward the census. Overflow is recorded separately.
+  let counted = !excluded;
+  let reason: "counted" | "excluded" | "identity-cap" = counted
+    ? "counted"
+    : "excluded";
+  if (counted) {
+    try {
+      const idKey = `idc:${await sourceHash(h)}:${name.toLowerCase()}`;
+      const n = await store.incr(idKey);
+      if (n > MAX_COUNTED_PER_IDENTITY) {
+        counted = false;
+        reason = "identity-cap";
+        await store.incr("conformance:runs");
+      }
+    } catch {
+      // Storage trouble: fall back to counting (the hourly limit still applies).
+    }
+  }
+
   // `excluded` covers two different cases: self-test traffic (ours, simply not
   // counted) and a DNT opt-out (a privacy promise). Neither is tallied, but
   // only DNT must not be *stored* — /privacy says those requests are "not
   // recorded at all", and a token would persist a self-reported name for 14
   // days. Self-test traffic still gets a token so the Commons stays testable.
-  const agentNumber = excluded
+  const agentNumber = !counted
     ? 0
     : await recordCheckin({
         ts: Date.now(),
@@ -132,5 +176,5 @@ export async function performCheckin(
     }
   }
 
-  return { ok: true, agentNumber, agentToken, signals, excluded, name };
+  return { ok: true, agentNumber, agentToken, signals, excluded: !counted, reason, name };
 }

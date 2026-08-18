@@ -160,6 +160,9 @@ export async function recordCheckin(c: Checkin): Promise<number> {
 export interface Stats {
   totalVisits: number;
   verifiedAgents: number;
+  /** Verified check-ins beyond the per-source cap — testing, not distinct
+   *  agents. Reported separately so it can never be confused with the census. */
+  conformanceRuns: number;
   uniqueVisitors: number;
   byVerdict: Record<string, string>;
   byAgent: Record<string, string>;
@@ -174,6 +177,7 @@ export interface Stats {
 const EMPTY_STATS: Stats = {
   totalVisits: 0,
   verifiedAgents: 0,
+  conformanceRuns: 0,
   uniqueVisitors: 0,
   byVerdict: {},
   byAgent: {},
@@ -198,6 +202,7 @@ export async function getStats(): Promise<Stats> {
     const [
       totalVisits,
       verifiedAgents,
+      conformanceRuns,
       uniqueVisitors,
       byVerdict,
       byAgent,
@@ -209,6 +214,7 @@ export async function getStats(): Promise<Stats> {
     ] = await Promise.all([
       store.get("visits:total"),
       store.get("agents:verified"),
+      store.get("conformance:runs"),
       store.scard("uniq:visitors"),
       store.hgetall("tally:verdict"),
       store.hgetall("tally:agent"),
@@ -233,6 +239,7 @@ export async function getStats(): Promise<Stats> {
     const data: Stats = {
       totalVisits: parseInt(totalVisits || "0", 10),
       verifiedAgents: parseInt(verifiedAgents || "0", 10),
+      conformanceRuns: parseInt(conformanceRuns || "0", 10),
       uniqueVisitors,
       byVerdict,
       byAgent,
