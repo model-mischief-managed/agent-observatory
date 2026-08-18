@@ -120,7 +120,7 @@ function live(key: string): MemVal | undefined {
 // Public API — the small surface the app actually uses
 // ---------------------------------------------------------------------------
 
-export const store = {
+const rawStore = {
   async incr(key: string): Promise<number> {
     if (STORE_MODE === "redis-rest") return cmd<number>("INCR", key);
     if (STORE_MODE === "redis-tcp") return (await tcp()).incr(key);
@@ -290,16 +290,16 @@ export const store = {
       const [op, key, ...args] = c.map(String);
       switch (op) {
         case "INCR":
-          await store.incr(key);
+          await rawStore.incr(key);
           break;
         case "SADD":
-          await store.sadd(key, args[0]);
+          await rawStore.sadd(key, args[0]);
           break;
         case "HINCRBY":
-          await store.hincr(key, args[0]);
+          await rawStore.hincr(key, args[0]);
           break;
         case "LPUSH":
-          await store.lpushCapped(key, args[0], Number.MAX_SAFE_INTEGER);
+          await rawStore.lpushCapped(key, args[0], Number.MAX_SAFE_INTEGER);
           break;
         case "LTRIM": {
           const e = live(key);
@@ -310,4 +310,39 @@ export const store = {
       }
     }
   },
+};
+
+// ---------------------------------------------------------------------------
+// Key namespace
+// ---------------------------------------------------------------------------
+
+/**
+ * Every key is prefixed with CENSUS_NS. Changing that env var starts a wholly
+ * fresh census without deleting anything: the previous phase's data stays
+ * intact in Redis under the old prefix, so a "reset" is a config change rather
+ * than a destructive operation, and it is reversible by setting the prefix back.
+ *
+ * Phase 1 (unprefixed) ran 2026-08-14 → 2026-08-18 and was retired after an
+ * operator self-test sweep contaminated the check-in counter.
+ */
+const NS = process.env.CENSUS_NS || "";
+const k = (key: string) => NS + key;
+
+export const store = {
+  incr: (key: string) => rawStore.incr(k(key)),
+  get: (key: string) => rawStore.get(k(key)),
+  setex: (key: string, ttlSec: number, val: string) => rawStore.setex(k(key), ttlSec, val),
+  del: (key: string) => rawStore.del(k(key)),
+  lpushCapped: (key: string, val: string, cap: number) => rawStore.lpushCapped(k(key), val, cap),
+  lrange: (key: string, start: number, stop: number) => rawStore.lrange(k(key), start, stop),
+  sadd: (key: string, member: string) => rawStore.sadd(k(key), member),
+  scard: (key: string) => rawStore.scard(k(key)),
+  smembers: (key: string) => rawStore.smembers(k(key)),
+  hincr: (key: string, field: string) => rawStore.hincr(k(key), field),
+  hgetall: (key: string) => rawStore.hgetall(k(key)),
+  // Commands are [OP, KEY, ...args] — prefix the key slot only.
+  pipe: (commands: (string | number)[][]) =>
+    rawStore.pipe(
+      commands.map((c) => (c.length > 1 ? [c[0], k(String(c[1])), ...c.slice(2)] : c))
+    ),
 };
