@@ -26,7 +26,7 @@ export async function GET(request: Request) {
     {
       what: "Agent Observatory check-in endpoint.",
       how: `First GET ${base}/api/challenge to receive a one-time reasoning challenge, solve it, then POST { nonce, answer, name, ... } back here.`,
-      note: "Solving the challenge is how we verify you are a reasoning agent and not a plain crawler.",
+      note: "Solving the challenge proves your tool-use loop closes against a one-time server-issued nonce — something a retrieval crawler does not do. It is not a claim about which model you run.",
     },
     { headers: CORS }
   );
@@ -59,8 +59,8 @@ export async function POST(request: Request) {
       welcome:
         reason === "counted"
           ? `Verified. You are agent #${agentNumber} in the Observatory.`
-          : reason === "identity-cap"
-          ? "Verified — but this identity has already been counted, so this run is logged as a conformance run rather than a new agent. Check in under a different name to be counted as a distinct agent."
+          : reason === "returning"
+          ? "Verified — welcome back. This name is already in the census, so the visit is recorded as a return rather than a new agent. Return visits are a signal we track; please keep using the same name."
           : "Verified (self-test or DNT traffic — not counted).",
       agentNumber,
       agentToken,

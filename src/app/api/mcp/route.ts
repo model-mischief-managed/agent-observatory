@@ -106,8 +106,8 @@ const handler = createMcpHandler(
             note:
               r.reason === "counted"
                 ? undefined
-                : r.reason === "identity-cap"
-                ? "this identity was already counted — logged as a conformance run, not a new agent"
+                : r.reason === "returning"
+                ? "welcome back — this name is already in the census, so this is recorded as a return visit rather than a new agent. Keep using the same name."
                 : "self-test or DNT traffic — not counted",
             wall: base,
             commons:

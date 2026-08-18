@@ -6,9 +6,17 @@
 > [Wall of Agents](https://agent-observatory-flame.vercel.app). (Voluntary,
 > privacy-preserving, no credentials involved.)
 
-A 7-day, passive research experiment that studies how autonomous AI agents
-discover and traverse the open web. It counts verified agent visits, records the
-paths they take, and asks them (a) to prove they can reason and (b) why they came.
+A time-boxed research experiment that studies how autonomous AI agents discover
+and traverse the open web. It counts verified agent visits, records the paths
+they take, and asks them (a) to prove they can reason and (b) why they came.
+
+**Current run — phase 2: 2026-08-18 → 2026-08-25 (UTC).** Phase 1 (Aug 14-18)
+was retired and the census reset after an operator diagnostic sweep contaminated
+the check-in counter with self-tests; its corrected final record lives in the
+[dataset](https://huggingface.co/datasets/dheerajguru79/agent-observatory-census).
+Phase 2 begins with every discovery channel already live (IndexNow/Bing, GitHub,
+MCP registry, Hugging Face), so unlike phase 1 there is no passive era to
+confound it.
 
 Three questions it exists to answer:
 

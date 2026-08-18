@@ -23,6 +23,17 @@ export function siteUrl(h?: Headers | null): string {
   return SITE.url;
 }
 
+/** Human/machine-readable one-liner for the current window, e.g.
+ *  "day 1 of 7 (2026-08-18 → 2026-08-25 UTC)". Used on the agent-facing
+ *  surfaces so a visitor knows exactly where in the study it has landed. */
+export function windowLine(): string {
+  const s = experimentState();
+  if (!s.started) return `${SITE.durationDays}-day window (not yet started)`;
+  if (s.ended) return "window closed — experiment complete";
+  const d = (iso: string) => iso.slice(0, 10);
+  return `day ${s.dayNumber} of ${SITE.durationDays} (${d(SITE.startIso)} → ${d(s.endsIso)} UTC)`;
+}
+
 export function experimentState(): {
   started: boolean;
   ended: boolean;

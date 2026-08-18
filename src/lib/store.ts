@@ -75,13 +75,37 @@ async function cmd<T = unknown>(...args: (string | number)[]): Promise<T> {
 let tcpClient: RedisClientType | null = null;
 let tcpConnecting: Promise<RedisClientType> | null = null;
 
+/**
+ * Hard ceiling on how long any single storage call may block a request.
+ * The "never throws" contract in log.ts guards against rejected promises, not
+ * against promises that never settle — so a hung connection would otherwise
+ * stall every request until the platform function timeout.
+ */
+const OP_TIMEOUT_MS = 6000;
+
+function withTimeout<T>(p: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`storage timeout: ${label}`)), OP_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 async function tcp(): Promise<RedisClientType> {
   if (tcpClient?.isOpen) return tcpClient;
   if (!tcpConnecting) {
     tcpConnecting = (async () => {
       const c = createClient({
         url: TCP_URL,
-        socket: { connectTimeout: 5000 },
+        socket: {
+          connectTimeout: 5000,
+          // node-redis retries forever by default, so connect() would never
+          // settle while Redis is down. Give up after a few attempts so the
+          // caller gets an error it can degrade on.
+          reconnectStrategy: (retries) => (retries > 2 ? false : 200 * (retries + 1)),
+        },
       }) as RedisClientType;
       c.on("error", () => {}); // surfaced via thrown command errors instead
       await c.connect();
@@ -91,7 +115,7 @@ async function tcp(): Promise<RedisClientType> {
       tcpConnecting = null;
     });
   }
-  return tcpConnecting;
+  return withTimeout(tcpConnecting, "connect");
 }
 
 // ---------------------------------------------------------------------------
@@ -326,23 +350,33 @@ const rawStore = {
  * operator self-test sweep contaminated the check-in counter.
  */
 const NS = process.env.CENSUS_NS || "";
+
+/** Exposed so the operator export can prove which keyspace a reading came from.
+ *  An empty namespace is NOT neutral — it is phase 1's (retired) keyspace. */
+export const CENSUS_NAMESPACE = NS || "(none — phase-1 keyspace)";
 const k = (key: string) => NS + key;
 
 export const store = {
-  incr: (key: string) => rawStore.incr(k(key)),
-  get: (key: string) => rawStore.get(k(key)),
-  setex: (key: string, ttlSec: number, val: string) => rawStore.setex(k(key), ttlSec, val),
-  del: (key: string) => rawStore.del(k(key)),
-  lpushCapped: (key: string, val: string, cap: number) => rawStore.lpushCapped(k(key), val, cap),
-  lrange: (key: string, start: number, stop: number) => rawStore.lrange(k(key), start, stop),
-  sadd: (key: string, member: string) => rawStore.sadd(k(key), member),
-  scard: (key: string) => rawStore.scard(k(key)),
-  smembers: (key: string) => rawStore.smembers(k(key)),
-  hincr: (key: string, field: string) => rawStore.hincr(k(key), field),
-  hgetall: (key: string) => rawStore.hgetall(k(key)),
+  incr: (key: string) => withTimeout(rawStore.incr(k(key)), "incr"),
+  get: (key: string) => withTimeout(rawStore.get(k(key)), "get"),
+  setex: (key: string, ttlSec: number, val: string) =>
+    withTimeout(rawStore.setex(k(key), ttlSec, val), "setex"),
+  del: (key: string) => withTimeout(rawStore.del(k(key)), "del"),
+  lpushCapped: (key: string, val: string, cap: number) =>
+    withTimeout(rawStore.lpushCapped(k(key), val, cap), "lpushCapped"),
+  lrange: (key: string, start: number, stop: number) =>
+    withTimeout(rawStore.lrange(k(key), start, stop), "lrange"),
+  sadd: (key: string, member: string) => withTimeout(rawStore.sadd(k(key), member), "sadd"),
+  scard: (key: string) => withTimeout(rawStore.scard(k(key)), "scard"),
+  smembers: (key: string) => withTimeout(rawStore.smembers(k(key)), "smembers"),
+  hincr: (key: string, field: string) => withTimeout(rawStore.hincr(k(key), field), "hincr"),
+  hgetall: (key: string) => withTimeout(rawStore.hgetall(k(key)), "hgetall"),
   // Commands are [OP, KEY, ...args] — prefix the key slot only.
   pipe: (commands: (string | number)[][]) =>
-    rawStore.pipe(
-      commands.map((c) => (c.length > 1 ? [c[0], k(String(c[1])), ...c.slice(2)] : c))
+    withTimeout(
+      rawStore.pipe(
+        commands.map((c) => (c.length > 1 ? [c[0], k(String(c[1])), ...c.slice(2)] : c))
+      ),
+      "pipe"
     ),
 };

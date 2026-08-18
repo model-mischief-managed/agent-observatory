@@ -18,25 +18,25 @@ import type { Signals } from "./classify";
 const MAX_CHECKINS_PER_HOUR = 20;
 
 /**
- * Cap on how many check-ins sharing BOTH a source and an agent identity may be
- * counted as distinct verified agents.
+ * `verifiedAgents` is a SET, not a counter.
  *
- * Learned the hard way: an operator diagnostic sweep from one machine produced
- * 19 "verified agents" in two hours because it simply forgot the self-exclusion
- * header. Exclusion that depends on a caller remembering a header is not a
- * safeguard.
+ * It was a counter, and an audit showed that made it measure check-ins rather
+ * than agents: three visits by one agent read as three agents, and the site's
+ * own copy invited exactly that ("check in again on a later day with the same
+ * name"). A counter can only ever be nudged upward; a set cannot.
  *
- * Keyed on (sourceHash + agent name), NOT source alone: autonomous agents
- * overwhelmingly run in cloud environments where many genuinely distinct agents
- * share one egress IP. A source-only cap would silently stop counting real
- * agents behind a shared NAT — suppressing the exact signal this experiment
- * exists to measure. Repeat check-ins under the SAME identity are what we cap;
- * a new identity from the same host still counts.
+ * Membership is the normalized agent name alone — deliberately NOT keyed on the
+ * source, because agents overwhelmingly run in cloud environments where the
+ * egress IP changes between visits, which would let the same agent re-enter the
+ * set every day. Name-only can UNDER-count (two unrelated agents both calling
+ * themselves "claude" collapse to one) but it cannot INFLATE, and under a
+ * "nothing may ever inflate this number" requirement, undercounting is the
+ * correct direction to fail.
  *
- * Beyond the cap a check-in still verifies and still gets a token — it just
- * lands in the conformance ledger instead of the census.
+ * Repeat check-ins are not discarded — they are the return-visit signal, and
+ * are recorded separately as `returning:checkins`.
  */
-const MAX_COUNTED_PER_IDENTITY = 3;
+const IDENTITY_SET = "identities";
 
 export interface CheckinInput {
   nonce?: unknown;
@@ -57,7 +57,7 @@ export type CheckinResult =
       /** true when the check-in did not count toward the census */
       excluded: boolean;
       /** why it did not count — so callers can say something accurate */
-      reason: "counted" | "excluded" | "identity-cap";
+      reason: "counted" | "excluded" | "returning";
       name: string;
     }
   | { ok: false; status: number; error: string; triesLeft?: number };
@@ -83,10 +83,15 @@ export async function performCheckin(
     };
   if (!name) return { ok: false, status: 400, error: "missing agent name" };
 
+  // DNT is an absolute opt-out: /privacy promises those requests are "not
+  // recorded at all", so short-circuit BEFORE the rate-limit key (which is
+  // derived from the visitor's IP) is written. Verification still runs.
+  const dnt = isDnt(h);
+
   // Abuse guard: cap check-in attempts per source per hour. The bucket key is
   // a salted hash (never the raw IP) and carries its own hour bucket, so the
   // window rolls over without a TTL that a failed write could strand.
-  if (!isSelf(h)) {
+  if (!isSelf(h) && !dnt) {
     try {
       const hour = Math.floor(Date.now() / 3_600_000);
       const n = await store.incr(`rl:${await sourceHash(h)}:${hour}`);
@@ -128,23 +133,24 @@ export async function performCheckin(
     verifiedAgent: true,
   });
 
-  // Second gate: repeated check-ins under the same identity from the same
-  // source stop counting toward the census. Overflow is recorded separately.
+  // Second gate: first sighting of this identity, or a return visit?
+  // SADD is atomic in both Redis backends, so concurrent check-ins under one
+  // name cannot both win the race and both be counted.
   let counted = !excluded;
-  let reason: "counted" | "excluded" | "identity-cap" = counted
-    ? "counted"
-    : "excluded";
+  let reason: "counted" | "excluded" | "returning" = counted ? "counted" : "excluded";
   if (counted) {
     try {
-      const idKey = `idc:${await sourceHash(h)}:${name.toLowerCase()}`;
-      const n = await store.incr(idKey);
-      if (n > MAX_COUNTED_PER_IDENTITY) {
+      const isFirstSighting = await store.sadd(IDENTITY_SET, name.toLowerCase());
+      if (!isFirstSighting) {
         counted = false;
-        reason = "identity-cap";
-        await store.incr("conformance:runs");
+        reason = "returning";
+        await store.incr("returning:checkins");
       }
     } catch {
-      // Storage trouble: fall back to counting (the hourly limit still applies).
+      // FAIL CLOSED. The invariant is "nothing may ever inflate the census", so
+      // when the guard itself cannot run, the safe answer is not to count.
+      counted = false;
+      reason = "returning";
     }
   }
 

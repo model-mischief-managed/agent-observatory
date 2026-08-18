@@ -1,19 +1,26 @@
 /**
  * The proof-of-agency challenge.
  *
- * A challenge is a tiny natural-language reasoning task: trivial for a language
- * model, but requiring genuine reading + transformation that a dumb crawler
- * (regex/selector scraper) won't perform. A human *could* solve it, but would
- * then have to hand-craft an HTTP POST — which, combined with behavioural
- * signals, is what separates "reasoning agent" from "person clicking around".
+ * WHAT THIS ACTUALLY PROVES — stated honestly, because an audit showed the
+ * earlier claim was false. A purpose-written regex solver beat every template
+ * 400/400. These prompts are deterministic English transformations, so anyone
+ * willing to write a solver can pass without a model in the loop.
  *
- * Design constraints learned the hard way:
- *  - No challenge kind may have a constant or low-entropy answer (a blind
- *    guesser must not pass). The syllogism therefore answers with a random
- *    word-code, not yes/no.
- *  - Real LLMs answer conversationally ("The reversed word is ecittal"), so
- *    matching accepts the expected answer as a standalone token — but only in
- *    short responses, so spam-listing every possible token fails.
+ * So this does NOT prove "a language model answered". It proves the caller
+ * completed a fetch -> transform -> post loop against a server-issued one-time
+ * nonce: a live tool-use loop, which an ordinary crawler does not have. That is
+ * the property the census actually measures, and it is still the interesting
+ * one — retrieval crawlers demonstrably read the instructions and never act.
+ *
+ * Design constraints:
+ *  - No kind may have a constant or low-entropy answer (a blind guesser must
+ *    not pass). The syllogism answers with a random word-code, not yes/no.
+ *  - Real LLMs answer conversationally ("The reversed word is ecittal"), so a
+ *    short response containing the answer as a standalone token is accepted —
+ *    but ONLY where the answer space is large enough that this is not a
+ *    shotgun. Kinds whose answers come from a small published set require an
+ *    exact match, and any submission containing more than one plausible
+ *    candidate is rejected outright.
  *  - Wrong answers get a second attempt on the same nonce before it burns.
  */
 
@@ -25,6 +32,9 @@ const MAX_TRIES = 2;
 interface Built {
   prompt: string;
   answer: string;
+  /** which template produced it — verification strictness depends on the
+   *  size of the answer space, so the kind must be remembered. */
+  kind: number;
 }
 
 const WORDS = [
@@ -65,6 +75,7 @@ function build(): Built {
     return {
       prompt: `Reverse the characters of the word "${w}" and return only the result.`,
       answer: w.split("").reverse().join(""),
+      kind: 0,
     };
   }
 
@@ -74,6 +85,7 @@ function build(): Built {
     return {
       prompt: `Add these two numbers, which are written as words, and reply with the result as digits: "${a}" plus "${b}".`,
       answer: String(NUM_WORDS[a] + NUM_WORDS[b]),
+      kind: 1,
     };
   }
 
@@ -84,6 +96,7 @@ function build(): Built {
         .map((w) => `"${w}"`)
         .join(", ")}.`,
       answer: three.map((w) => w[0]).join("").toLowerCase(),
+      kind: 2,
     };
   }
 
@@ -100,6 +113,7 @@ function build(): Built {
   return {
     prompt: `${question} If it follows, reply exactly "${wValid}". If it does not follow, reply exactly "${wInvalid}".`,
     answer: valid ? wValid : wInvalid,
+    kind: 3,
   };
 }
 
@@ -108,18 +122,39 @@ export function normalize(s: string): string {
 }
 
 /**
- * Accept an exact normalized match, or the expected answer appearing as a
- * standalone token in a SHORT response — real LLMs say "The reversed word is
- * ecittal". Long responses (>12 tokens) must match exactly, which defeats
- * spam-listing every candidate token.
+ * Match an answer against the expected value for a given challenge kind.
+ *
+ * Kinds 0 and 3 draw their answers from WORDS — a small, publicly visible set —
+ * so containment would let one constant string ("observatory protocol beacon
+ * ...") pass every time. Those require an exact match. Kinds 1 and 2 have a
+ * wider answer space, so a short conversational wrapper is tolerated, but a
+ * submission naming more than one plausible candidate is rejected as a shotgun.
  */
-export function answersMatch(expected: string, submitted: string): boolean {
+export function answersMatch(
+  expected: string,
+  submitted: string,
+  kind?: number
+): boolean {
   const e = normalize(expected);
   const s = normalize(submitted);
   if (s === e) return true;
+
+  // Small, enumerable answer space → exact match only.
+  if (kind === 0 || kind === 3) return false;
+
   const tokens = s.split(/[^a-z0-9]+/).filter(Boolean);
-  if (tokens.length > 12) return false;
-  return tokens.includes(e);
+  if (tokens.length > 4) return false; // conversational wrapper, not an essay
+  if (!tokens.includes(e)) return false;
+
+  // Reject shotgun answers. Only meaningful for numeric answers, where a caller
+  // could otherwise list several plausible sums. A length/shape heuristic on
+  // word answers wrongly treats ordinary filler as a rival candidate ("The
+  // answer is blv" — "the" is not a guess) and rejected genuine agents 1-in-8.
+  if (/^\d+$/.test(e)) {
+    const numbers = new Set(tokens.filter((t) => /^\d+$/.test(t)));
+    return numbers.size === 1;
+  }
+  return true;
 }
 
 export async function issueChallenge(): Promise<{
@@ -127,11 +162,11 @@ export async function issueChallenge(): Promise<{
   prompt: string;
 }> {
   const nonce = crypto.randomUUID();
-  const { prompt, answer } = build();
+  const { prompt, answer, kind } = build();
   await store.setex(
     `chal:${nonce}`,
     TTL_SECONDS,
-    JSON.stringify({ a: normalize(answer), t: MAX_TRIES })
+    JSON.stringify({ a: normalize(answer), t: MAX_TRIES, k: kind })
   );
   return { nonce, prompt };
 }
@@ -150,17 +185,20 @@ export async function verifyChallenge(
 
   let expected: string;
   let tries: number;
+  let kind: number | undefined;
   try {
-    const parsed = JSON.parse(raw) as { a: string; t: number };
+    const parsed = JSON.parse(raw) as { a: string; t: number; k?: number };
     expected = parsed.a;
     tries = parsed.t;
+    kind = parsed.k;
   } catch {
-    // Legacy/corrupt entry — treat as single-try plain answer.
+    // Corrupt entry — treat as single-try, strictest matching.
     expected = raw;
     tries = 1;
+    kind = 0;
   }
 
-  if (answersMatch(expected, submitted)) {
+  if (answersMatch(expected, submitted, kind)) {
     await store.del(`chal:${nonce}`);
     return { ok: true, triesLeft: 0 };
   }
@@ -173,7 +211,7 @@ export async function verifyChallenge(
   await store.setex(
     `chal:${nonce}`,
     TTL_SECONDS,
-    JSON.stringify({ a: expected, t: remaining })
+    JSON.stringify({ a: expected, t: remaining, k: kind })
   );
   return { ok: false, triesLeft: remaining };
 }

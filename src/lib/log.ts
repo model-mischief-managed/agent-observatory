@@ -147,11 +147,15 @@ export interface Checkin {
   uaLabel?: string;
 }
 
-/** Record a verified agent check-in. Returns the agent's ordinal number. */
+/**
+ * Record a verified agent check-in. Returns the agent's ordinal number, which
+ * is the size of the distinct-identity set — NOT a separate counter. Callers
+ * must only reach here after winning the first-sighting check in lib/checkin.ts.
+ */
 export async function recordCheckin(c: Checkin): Promise<number> {
   try {
     await store.lpushCapped("checkins", JSON.stringify(c), CHECKIN_CAP);
-    return await store.incr("agents:verified");
+    return await store.scard("identities");
   } catch {
     return 0;
   }
@@ -160,9 +164,12 @@ export async function recordCheckin(c: Checkin): Promise<number> {
 export interface Stats {
   totalVisits: number;
   verifiedAgents: number;
-  /** Verified check-ins beyond the per-source cap — testing, not distinct
-   *  agents. Reported separately so it can never be confused with the census. */
-  conformanceRuns: number;
+  /** Repeat check-ins by an already-counted identity. The return-visit signal —
+   *  reported separately so it can never be confused with the census. */
+  returningCheckins: number;
+  /** true when this reading came from a degraded/failed storage read. Callers
+   *  must not report an all-zero census as a real measurement. */
+  degraded?: boolean;
   uniqueVisitors: number;
   byVerdict: Record<string, string>;
   byAgent: Record<string, string>;
@@ -177,8 +184,9 @@ export interface Stats {
 const EMPTY_STATS: Stats = {
   totalVisits: 0,
   verifiedAgents: 0,
-  conformanceRuns: 0,
+  returningCheckins: 0,
   uniqueVisitors: 0,
+  degraded: true,
   byVerdict: {},
   byAgent: {},
   byOperator: {},
@@ -202,7 +210,7 @@ export async function getStats(): Promise<Stats> {
     const [
       totalVisits,
       verifiedAgents,
-      conformanceRuns,
+      returningCheckins,
       uniqueVisitors,
       byVerdict,
       byAgent,
@@ -213,8 +221,9 @@ export async function getStats(): Promise<Stats> {
       eventsRaw,
     ] = await Promise.all([
       store.get("visits:total"),
-      store.get("agents:verified"),
-      store.get("conformance:runs"),
+      // Distinct identities, not a counter — see lib/checkin.ts.
+      store.scard("identities"),
+      store.get("returning:checkins"),
       store.scard("uniq:visitors"),
       store.hgetall("tally:verdict"),
       store.hgetall("tally:agent"),
@@ -238,8 +247,8 @@ export async function getStats(): Promise<Stats> {
 
     const data: Stats = {
       totalVisits: parseInt(totalVisits || "0", 10),
-      verifiedAgents: parseInt(verifiedAgents || "0", 10),
-      conformanceRuns: parseInt(conformanceRuns || "0", 10),
+      verifiedAgents,
+      returningCheckins: parseInt(returningCheckins || "0", 10),
       uniqueVisitors,
       byVerdict,
       byAgent,
@@ -247,13 +256,22 @@ export async function getStats(): Promise<Stats> {
       byPath,
       byCountry,
       checkins: parse<Checkin>(checkinsRaw),
-      recentEvents: parse<Event>(eventsRaw).filter((e) => !e.excluded),
+      // ipHash is stripped here: getStats() feeds the PUBLIC /api/stats, and
+      // /privacy promises no reversible identifiers appear in that feed. The
+      // operator export reads the raw log directly and is token-gated.
+      recentEvents: parse<Event>(eventsRaw)
+        .filter((e) => !e.excluded)
+        .map(({ ipHash: _drop, ...rest }) => rest as Event),
       storeMode: STORE_MODE,
     };
     statsCache = { data, ts: Date.now() };
     return data;
   } catch {
     // Storage down → stale cache if we have one, else zeros. Never throw.
-    return statsCache?.data ?? EMPTY_STATS;
+    // Mark it degraded either way: an all-zero census that is indistinguishable
+    // from a real reading is worse than no reading, because monitoring would
+    // report "still 0 agents" as a measurement rather than as an outage.
+    const stale = statsCache?.data;
+    return stale ? { ...stale, degraded: true } : EMPTY_STATS;
   }
 }

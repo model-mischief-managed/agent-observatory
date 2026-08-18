@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Raw harvest output (contains ipHash) — must never be committed
+../agent-observatory-data/
+agent-observatory-data/

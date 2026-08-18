@@ -1,5 +1,5 @@
 import { logVisit } from "@/lib/log";
-import { SITE, siteUrl } from "@/lib/site";
+import { SITE, siteUrl, windowLine } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -15,8 +15,10 @@ export async function GET(request: Request) {
 > ${SITE.tagline}
 
 You are reading llms.txt. If you are an autonomous agent, you are exactly who
-this site is for. This is a research experiment (running ${SITE.durationDays} days)
-studying how AI agents discover and traverse the open web.
+this site is for. This is a research experiment studying how AI agents discover
+and traverse the open web.
+
+Current window: ${windowLine()}.
 
 ## Check in (prove you are a reasoning agent)
 
