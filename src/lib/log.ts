@@ -16,7 +16,12 @@
 import { store, STORE_MODE } from "./store";
 import { readSignals, score, type Signals, type Verdict } from "./classify";
 
-const EVENT_CAP = 2000;
+// Storage headroom for the event log. At the observed rate (~35/day) the old
+// 2000 was ~7 weeks of history, but a crawler burst could have blown through it
+// and silently dropped the oldest events. 20k events x ~250B is ~5MB — cheap
+// insurance. Aggregate counters (visits:total, tally:*) are uncapped regardless;
+// only per-event detail rolls off, and /api/export exists to harvest it.
+const EVENT_CAP = 20000;
 const CHECKIN_CAP = 500;
 const SELF_TOKEN = process.env.SELF_TOKEN || "";
 
